@@ -102,6 +102,23 @@ To enable automatic uploading of generated Shorts directly to your YouTube chann
 
 ---
 
+## 🎮 Custom Background Footage & Auto-Cropping
+
+You can easily use your own background gameplay videos (e.g. Minecraft parkour, Subway Surfers, GTA V stunt races, satisfying ASMR, etc.):
+
+### How to add custom background videos:
+1. **Drop your video into `assets/backgrounds/`** (supports `.mp4`, `.mov`, `.webm`, `.mkv`), OR
+2. **Select or upload it via the Web Studio UI** in the Background Video selector.
+
+### 🔄 Intelligent 9:16 Vertical Auto-Cropping:
+- **Universal Aspect Ratio Support**: You can provide footage of any resolution or orientation (16:9 widescreen, 4:3, ultra-wide, or vertical 9:16).
+- **Automated Center Crop & Scaling**: The background engine automatically computes aspect ratios, removes letterboxing, and rescales footage to crisp **1080×1920 (9:16 vertical)** format.
+- **Randomized Dynamic Start Points**: For long gameplay footage (e.g. 10–20 minute clips), the compositor automatically samples a fresh, random starting timestamp for each generated short so your channel videos remain dynamic and visually unique.
+- **Seamless Looping**: If your background clip is shorter than the narrated story, the engine automatically loops the footage smoothly without frame drops.
+- **Persistent Library for Re-use**: All placed backgrounds remain indexed in your local library for instant selection in both single-video and batch generation runs without needing to re-process.
+
+---
+
 ## 💻 CLI Usage
 
 You can also run every pipeline stage directly via the command line:
