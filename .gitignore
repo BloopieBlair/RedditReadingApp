@@ -1,0 +1,74 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments & Virtual Envs
+.env
+.env.*
+!.env.example
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Credentials, Secrets & OAuth Tokens
+client_secret.json
+client_secrets.json
+*token*.json
+*.pem
+*.key
+*.p12
+
+# Output & Temporary Data
+temp/
+output/
+*.mp3
+*.wav
+*.mp4
+*.mov
+*.webm
+!assets/
+!assets/fallback_background*.mp4
+!assets/music/*.wav
+!assets/templates/*
+!assets/client_secret.json.example
+!assets/**/*.gitkeep
+assets/backgrounds/*.mp4
+assets/backgrounds/*.mov
+assets/backgrounds/*.webm
+assets/custom_videoplayback.mp4
+assets/*.mp4
+assets/*.mov
+!assets/fallback_background.mp4
+!assets/fallback_background_h264.mp4
+
+# Testing & Caches
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# IDE & Editor Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Agent internal metadata & workspace
+.agents/
+.agents
+.agents/**
+.gemini/
+.gemini/**
