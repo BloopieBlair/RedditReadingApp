@@ -9,6 +9,20 @@ Automated, high-performance pipeline and Web Studio for generating and uploading
 
 ---
 
+## 🎥 App Demonstration
+
+<div align="center">
+  <video src="https://raw.githubusercontent.com/BloopieBlair/RedditReadingApp/master/docs/demo.mp4" controls="controls" width="100%" poster="docs/screenshots/studio_dashboard.png">
+  </video>
+  <p align="center">
+    🎬 <strong><a href="https://raw.githubusercontent.com/BloopieBlair/RedditReadingApp/master/docs/demo.mp4">▶ Click here to view / play the full HD Demo Walkthrough Video (docs/demo.mp4)</a></strong>
+  </p>
+</div>
+
+---
+
+### 📸 Studio Screenshots
+
 <p align="center">
   <img src="docs/screenshots/studio_dashboard.png" alt="Reddit Shorts Studio Control Panel" width="100%" />
 </p>

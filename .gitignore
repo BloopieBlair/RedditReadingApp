@@ -42,9 +42,12 @@ assets/backgrounds/*.mov
 assets/backgrounds/*.webm
 assets/custom_videoplayback.mp4
 assets/*.mp4
-assets/*.mov
 !assets/fallback_background.mp4
 !assets/fallback_background_h264.mp4
+!docs/
+!docs/**
+!docs/demo.mp4
+ExampleVideo/
 
 # Testing & Caches
 .pytest_cache/
