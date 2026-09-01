@@ -200,6 +200,17 @@ RedditReadingApp/
 
 ---
 
+## Support Development
+
+This project is free and open source. If it saved you time or you would
+like to support continued development, you can optionally support me on
+[Ko-fi](https://ko-fi.com/bloopieblair).
+
+Donations do not unlock additional features or support. Every public
+release remains freely available here on GitHub.
+
+---
+
 ## 📄 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
