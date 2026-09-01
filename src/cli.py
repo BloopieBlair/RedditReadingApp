@@ -169,6 +169,65 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true",
         help="Simulate upload without actually uploading to YouTube",
     )
+    # ── ai-op (AI Reddit Poster & Auto-Workflow) ──────────────────────────
+    ai_op_parser = subparsers.add_parser(
+        "ai-op", help="AI OP Reddit Poster and Automated Video Workflow"
+    )
+    ai_op_subparsers = ai_op_parser.add_subparsers(dest="ai_op_action", help="AI OP Subcommands")
+
+    # ai-op generate
+    gen_parser = ai_op_subparsers.add_parser("generate", help="Generate AI post idea for a subreddit")
+    gen_parser.add_argument("--subreddit", type=str, default="AskReddit", help="Target subreddit (default: AskReddit)")
+    gen_parser.add_argument("--theme", type=str, default=None, help="Optional topic/theme (e.g. 'dating', 'roommates')")
+    gen_parser.add_argument("--style", type=str, default="comedic", choices=["comedic", "absurd", "provocative", "story", "thought-provoking"], help="Persona style")
+
+    # ai-op post
+    post_parser = ai_op_subparsers.add_parser("post", help="Generate and post to Reddit from AI bot account")
+    post_parser.add_argument("--subreddit", type=str, default="AskReddit", help="Target subreddit (default: AskReddit)")
+    post_parser.add_argument("--theme", type=str, default=None, help="Optional topic/theme")
+    post_parser.add_argument("--style", type=str, default="comedic", help="Persona style")
+    post_parser.add_argument("--min-comments", type=int, default=2, help="Minimum target comments before rendering (default: 2)")
+    post_parser.add_argument("--dry-run", action="store_true", help="Simulate Reddit submission without posting live")
+
+    # ai-op list
+    list_parser = ai_op_subparsers.add_parser("list", help="List tracked AI OP posts")
+    list_parser.add_argument("--status", type=str, default=None, help="Filter by status (submitted, waiting_for_comments, ready_to_render, rendered)")
+    list_parser.add_argument("--subreddit", type=str, default=None, help="Filter by subreddit")
+
+    # ai-op check
+    check_parser = ai_op_subparsers.add_parser("check", help="Check comments on a tracked AI OP post")
+    check_parser.add_argument("--post-id", type=str, required=True, help="Reddit post ID to check")
+
+    # ai-op render
+    render_parser = ai_op_subparsers.add_parser("render", help="Render video for a tracked AI OP post")
+    render_parser.add_argument("--post-id", type=str, required=True, help="Reddit post ID to render")
+    render_parser.add_argument("--voice", type=str, default="en-US-ChristopherNeural", help="Edge-TTS voice name")
+    render_parser.add_argument("--background", type=str, default=None, help="Background video path")
+    render_parser.add_argument("--upload", action="store_true", help="Upload rendered video to YouTube")
+    render_parser.add_argument("--dry-run", action="store_true", help="Dry run mode for upload")
+
+    # ai-op watch
+    watch_parser = ai_op_subparsers.add_parser("watch", help="Monitor active AI OP posts and auto-render when comments arrive")
+    watch_parser.add_argument("--poll-interval", type=int, default=60, help="Check interval in seconds (default: 60)")
+    watch_parser.add_argument("--auto-render", action=argparse.BooleanOptionalAction, default=True, help="Auto-render video when comments reach target")
+    watch_parser.add_argument("--upload", action="store_true", help="Auto-upload to YouTube after rendering")
+
+    # ai-op run-all
+    run_all_parser = ai_op_subparsers.add_parser("run-all", help="Complete workflow: generate -> post -> wait -> render video")
+    run_all_parser.add_argument("--subreddit", type=str, default="AskReddit", help="Target subreddit (default: AskReddit)")
+    run_all_parser.add_argument("--theme", type=str, default=None, help="Optional topic/theme")
+    run_all_parser.add_argument("--style", type=str, default="comedic", help="Persona style")
+    run_all_parser.add_argument("--min-comments", type=int, default=2, help="Target comments (default: 2)")
+    run_all_parser.add_argument("--poll-interval", type=int, default=60, help="Poll interval in seconds (default: 60)")
+    run_all_parser.add_argument("--max-wait", type=int, default=3600, help="Max wait in seconds before timeout (default: 3600)")
+    run_all_parser.add_argument("--voice", type=str, default="en-US-ChristopherNeural", help="Edge-TTS voice")
+    run_all_parser.add_argument("--upload", action="store_true", help="Upload to YouTube after rendering")
+    run_all_parser.add_argument("--dry-run", action="store_true", help="Simulate posting and uploading without live API calls")
+
+    # ai-op login (Sock Puppet Interactive Browser Login)
+    login_parser = ai_op_subparsers.add_parser("login", help="Open browser to log into Reddit sock puppet account")
+    login_parser.add_argument("--timeout", type=int, default=120, help="Login timeout in seconds (default: 120)")
+
     # ── web (Web UI server) ───────────────────────────────────────────────
     web_parser = subparsers.add_parser(
         "web", help="Start the Reddit Reading Web UI server (http://localhost:8000)"
@@ -356,6 +415,162 @@ async def cmd_pipeline(args: argparse.Namespace) -> None:
             print("  (dry run — no actual upload performed)")
 
 
+async def cmd_ai_op(args: argparse.Namespace) -> None:
+    """Handle 'ai-op' subcommands."""
+    action = getattr(args, "ai_op_action", None)
+    if not action:
+        print("Error: Please specify an ai-op subcommand (generate, post, list, check, render, watch, run-all).")
+        print("Run 'python main.py ai-op --help' for usage.")
+        return
+
+    import time
+    from src.models import AIPostRecord
+    from src.poster import AIOPGenerator, RedditPosterClient, AIPostTracker, AIPostWatcher
+
+    if action == "generate":
+        gen = AIOPGenerator()
+        print(f"Generating AI OP post for r/{args.subreddit} (style: {args.style})...")
+        post = gen.generate_post(subreddit=args.subreddit, theme=args.theme, style=args.style)
+        print("\n[Generated AI Post Idea]")
+        print(f"  Subreddit: r/{post['subreddit']}")
+        print(f"  Title:     {post['title']}")
+        if post.get("body"):
+            print(f"  Body:      {post['body']}")
+        print(f"  Rationale: {post.get('rationale', 'N/A')}")
+        print(f"  Fallback:  {post.get('is_fallback', False)}")
+
+    elif action == "post":
+        gen = AIOPGenerator()
+        client = RedditPosterClient(dry_run=args.dry_run)
+        tracker = AIPostTracker()
+
+        print(f"1/2: Generating funny post for r/{args.subreddit}...")
+        post = gen.generate_post(subreddit=args.subreddit, theme=args.theme, style=args.style)
+        print(f"  Title: {post['title']}")
+
+        print(f"2/2: Submitting post to Reddit{' (DRY RUN)' if args.dry_run else ''}...")
+        res = client.submit_post(
+            subreddit=args.subreddit,
+            title=post["title"],
+            body=post.get("body", ""),
+            dry_run=args.dry_run,
+        )
+
+        record = AIPostRecord(
+            post_id=res["post_id"],
+            subreddit=args.subreddit,
+            title=post["title"],
+            body=post.get("body", ""),
+            url=res["url"],
+            author=res.get("author", "AI_OP_Bot"),
+            created_utc=time.time(),
+            status="waiting_for_comments",
+            min_comments_target=args.min_comments,
+            is_simulated=res.get("is_simulated", False),
+        )
+        tracker.add_post(record)
+
+        print("\n[OK] AI OP Post submitted and registered in tracker!")
+        print(f"  Post ID:    {record.post_id}")
+        print(f"  URL:        {record.url}")
+        print(f"  Status:     {record.status}")
+        print(f"  Target:     {record.min_comments_target} comments before video render")
+
+    elif action == "list":
+        tracker = AIPostTracker()
+        posts = tracker.list_posts(status=args.status, subreddit=args.subreddit)
+        print(f"\nFound {len(posts)} tracked AI OP posts:")
+        print("-" * 75)
+        for p in posts:
+            status_tag = f"[{p.status.upper()}]"
+            print(f"{status_tag:<22} ID: {p.post_id:<10} r/{p.subreddit:<15} Comments: {p.current_comments_count}/{p.min_comments_target}")
+            print(f"  Title: {p.title[:70]}")
+            if p.rendered_video_path:
+                print(f"  Video: {p.rendered_video_path}")
+            print()
+
+    elif action == "check":
+        watcher = AIPostWatcher()
+        print(f"Checking live comments for AI OP post [{args.post_id}]...")
+        res = await watcher.check_post_comments(args.post_id)
+        if res.get("status") == "success":
+            print(f"[OK] Comments: {res['current_comments_count']}/{res['min_comments_target']} (Ready: {res['is_ready']})")
+            if res.get("previews"):
+                print("  Top meatbag comments:")
+                for c in res["previews"]:
+                    print(f"    - {c}")
+        else:
+            print(f"Error checking comments: {res.get('error')}")
+
+    elif action == "render":
+        watcher = AIPostWatcher()
+        print(f"Rendering video for AI OP post [{args.post_id}]...")
+        res = await watcher.render_post_video(
+            post_id=args.post_id,
+            voice=args.voice,
+            background_video=args.background,
+            upload=args.upload,
+            dry_run=args.dry_run,
+        )
+        print(f"\n[OK] AI OP Video Rendered!")
+        print(f"  Video Path: {res.get('video_path')}")
+        print(f"  Folder:     {res.get('output_folder')}")
+
+    elif action == "watch":
+        watcher = AIPostWatcher()
+        print(f"Starting AI OP Watcher (poll interval: {args.poll_interval}s, auto-render: {args.auto_render})...")
+        while True:
+            active_posts = watcher.tracker.list_posts()
+            pending = [p for p in active_posts if p.status in ("submitted", "waiting_for_comments", "ready_to_render")]
+            if not pending:
+                print("No pending AI OP posts to monitor.")
+                break
+            print(f"Checking {len(pending)} pending posts...")
+            for p in pending:
+                check = await watcher.check_post_comments(p.post_id)
+                if check.get("is_ready") and args.auto_render and p.status != "rendered":
+                    print(f"Post [{p.post_id}] is ready! Rendering video...")
+                    await watcher.render_post_video(post_id=p.post_id, upload=args.upload)
+            await asyncio.sleep(args.poll_interval)
+
+    elif action == "run-all":
+        watcher = AIPostWatcher()
+        print(f"Starting complete autonomous AI OP workflow for r/{args.subreddit}...")
+        res = await watcher.run_ai_op_workflow(
+            subreddit=args.subreddit,
+            theme=args.theme,
+            style=args.style,
+            min_comments=args.min_comments,
+            poll_interval=args.poll_interval,
+            max_wait_seconds=args.max_wait,
+            voice=args.voice,
+            upload=args.upload,
+            dry_run=args.dry_run,
+        )
+        if res.get("status") == "success":
+            print(f"\n[OK] Complete AI OP workflow finished successfully!")
+            print(f"  Post ID:    {res['post_id']}")
+            print(f"  Reddit URL: {res['url']}")
+            print(f"  Title:      {res['title']}")
+            print(f"  Video:      {res['video_path']}")
+        else:
+            print(f"\n[!] Workflow ended with status: {res.get('status')}")
+            if res.get("error"):
+                print(f"  Error: {res.get('error')}")
+
+    elif action == "login":
+        client = RedditPosterClient()
+        print("Opening Chromium browser for Reddit sock puppet account login...")
+        print("Please enter your login details in the opened browser window.")
+        timeout = getattr(args, "timeout", 120)
+        try:
+            res = client.login_browser_interactive(timeout_seconds=timeout)
+            print(f"\n[OK] {res.get('message')}")
+            print(f"  Session saved to: {res.get('session_file')}")
+        except Exception as e:
+            print(f"\n[ERROR] Login failed: {e}")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
     """CLI execution entrypoint."""
     ensure_directories()
@@ -379,6 +594,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             cmd_upload(args)
         elif args.command == "pipeline":
             asyncio.run(cmd_pipeline(args))
+        elif args.command == "ai-op":
+            asyncio.run(cmd_ai_op(args))
         elif args.command == "web":
             cmd_web(args)
         else:
@@ -395,3 +612,4 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
+

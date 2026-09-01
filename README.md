@@ -61,7 +61,7 @@ Automated, high-performance pipeline and Web Studio for generating and uploading
 
 Clone the repository:
 ```bash
-git clone https://github.com/yourusername/RedditReadingApp.git
+git clone https://github.com/BloopieBlair/RedditReadingApp.git
 cd RedditReadingApp
 ```
 
@@ -69,7 +69,7 @@ Create and activate a virtual environment:
 ```bash
 # Windows
 python -m venv .venv
-.venv\Scripts\activate
+.\.venv\Scripts\activate
 
 # Linux / macOS
 python3 -m venv .venv

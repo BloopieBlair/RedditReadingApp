@@ -736,6 +736,231 @@ def serve_output_file(folder_name: str, filename: str):
     return FileResponse(file_path)
 
 
+# ── AI OP (Auto-Poster & Watcher) Endpoints ──────────────────────────────
+class AIOPGenerateRequest(BaseModel):
+    subreddit: str = "AskReddit"
+    theme: Optional[str] = None
+    style: str = "comedic"
+
+
+class AIOPPostRequest(BaseModel):
+    subreddit: str = "AskReddit"
+    title: str
+    body: Optional[str] = ""
+    style: Optional[str] = "comedic"
+    min_comments: int = 2
+    dry_run: bool = False
+
+
+class SaveRedditCredentialsRequest(BaseModel):
+    client_id: str
+    client_secret: str
+    username: str
+    password: str
+    user_agent: Optional[str] = None
+
+
+@app.post("/api/ai-op/generate")
+def api_ai_op_generate(req: AIOPGenerateRequest):
+    """Generate a funny post tailored for the target subreddit."""
+    from src.poster import AIOPGenerator
+    gen = AIOPGenerator()
+    try:
+        post = gen.generate_post(subreddit=req.subreddit, theme=req.theme, style=req.style)
+        return {"status": "success", "post": post}
+    except Exception as e:
+        logger.error(f"AI OP generate failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ai-op/post")
+def api_ai_op_post(req: AIOPPostRequest):
+    """Post an AI-crafted submission to Reddit and register in tracker."""
+    import time
+    from src.poster import RedditPosterClient, AIPostTracker
+    from src.models import AIPostRecord
+
+    client = RedditPosterClient(dry_run=req.dry_run)
+    tracker = AIPostTracker()
+
+    try:
+        res = client.submit_post(
+            subreddit=req.subreddit,
+            title=req.title,
+            body=req.body or "",
+            dry_run=req.dry_run,
+        )
+
+        record = AIPostRecord(
+            post_id=res["post_id"],
+            subreddit=req.subreddit,
+            title=req.title,
+            body=req.body or "",
+            url=res["url"],
+            author=res.get("author", "AI_OP_Bot"),
+            created_utc=time.time(),
+            status="waiting_for_comments",
+            min_comments_target=req.min_comments,
+            is_simulated=res.get("is_simulated", False),
+        )
+        tracker.add_post(record)
+        return {"status": "success", "record": record.to_dict()}
+    except Exception as e:
+        logger.error(f"AI OP post failed: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/ai-op/posts")
+def api_ai_op_list_posts(status: Optional[str] = None, subreddit: Optional[str] = None):
+    """Return all tracked AI OP submissions."""
+    from src.poster import AIPostTracker
+    tracker = AIPostTracker()
+    posts = tracker.list_posts(status=status, subreddit=subreddit)
+    return {"status": "success", "posts": [p.to_dict() for p in posts]}
+
+
+@app.post("/api/ai-op/check/{post_id}")
+async def api_ai_op_check_post(post_id: str):
+    """Check live Reddit comments for a tracked AI OP post."""
+    from src.poster import AIPostWatcher
+    watcher = AIPostWatcher()
+    res = await watcher.check_post_comments(post_id)
+    return res
+
+
+@app.post("/api/ai-op/render/{post_id}")
+async def api_ai_op_render_post(post_id: str, background_tasks: BackgroundTasks):
+    """Trigger video rendering for a tracked AI OP post."""
+    global job_status
+    from src.poster import AIPostWatcher, AIPostTracker
+    tracker = AIPostTracker()
+    record = tracker.get_post(post_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    job_status.update({
+        "status": "running",
+        "stage": "Rendering AI OP Post",
+        "message": f"Rendering video for post [{record.post_id}] in r/{record.subreddit}...",
+        "result": None,
+        "error": None,
+    })
+
+    async def _do_render():
+        global job_status
+        watcher = AIPostWatcher()
+        try:
+            res = await watcher.render_post_video(post_id=post_id)
+            job_status.update({
+                "status": "completed",
+                "stage": "AI OP Video Rendered!",
+                "message": f"Successfully rendered video: {res.get('video_path')}",
+                "result": res,
+                "error": None,
+            })
+        except Exception as e:
+            logger.error(f"AI OP render failed: {e}", exc_info=True)
+            job_status.update({
+                "status": "error",
+                "stage": "Render Failed",
+                "message": str(e),
+                "result": None,
+                "error": str(e),
+            })
+
+    background_tasks.add_task(_do_render)
+    return {"status": "started", "message": f"Rendering video for post [{post_id}]"}
+
+
+@app.delete("/api/ai-op/posts/{post_id}")
+def api_ai_op_delete_post(post_id: str):
+    """Delete a tracked AI OP post."""
+    from src.poster import AIPostTracker
+    tracker = AIPostTracker()
+    deleted = tracker.delete_post(post_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Post not found")
+    return {"status": "success", "message": "Post deleted"}
+
+
+@app.get("/api/ai-op/credentials")
+def api_ai_op_get_credentials():
+    """Check status of configured Reddit sock puppet session and bot credentials."""
+    from src.config import get_reddit_credentials
+    from src.poster import RedditPosterClient
+    client = RedditPosterClient()
+    creds = get_reddit_credentials()
+    cid = creds.get("client_id", "")
+    session_status = client.get_session_status()
+    return {
+        "has_session": client.has_session,
+        "has_credentials": client.has_credentials,
+        "username": creds.get("username", "") or session_status.get("username", ""),
+        "client_id_preview": f"{cid[:4]}...{cid[-4:]}" if len(cid) > 8 else (cid or "Not set"),
+        "user_agent": creds.get("user_agent", ""),
+        "session_status": session_status,
+    }
+
+
+@app.post("/api/ai-op/browser-login")
+def api_ai_op_browser_login(timeout: int = 120):
+    """Launch Playwright browser window to log in to Reddit Sock Puppet account."""
+    from src.poster import RedditPosterClient
+    client = RedditPosterClient()
+    try:
+        res = client.login_browser_interactive(timeout_seconds=timeout)
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ai-op/credentials")
+def api_ai_op_save_credentials(req: SaveRedditCredentialsRequest):
+    """Save Reddit bot account credentials."""
+    from src.config import save_reddit_credentials
+    saved = save_reddit_credentials(
+        client_id=req.client_id,
+        client_secret=req.client_secret,
+        username=req.username,
+        password=req.password,
+        user_agent=req.user_agent,
+    )
+    if not saved:
+        raise HTTPException(status_code=500, detail="Failed to save credentials")
+    return {"status": "success", "message": "Reddit credentials saved successfully"}
+
+
+@app.post("/api/ai-op/test-credentials")
+def api_ai_op_test_credentials(req: Optional[SaveRedditCredentialsRequest] = None):
+    """Test Reddit OAuth authentication and fetch bot account info."""
+    from src.poster import RedditPosterClient
+    if req and req.client_id and req.client_secret and req.username and req.password:
+        client = RedditPosterClient(
+            client_id=req.client_id,
+            client_secret=req.client_secret,
+            username=req.username,
+            password=req.password,
+            user_agent=req.user_agent,
+        )
+    else:
+        client = RedditPosterClient()
+
+    if not client.has_credentials:
+        raise HTTPException(status_code=400, detail="Reddit credentials are not configured")
+
+    try:
+        me = client.get_me()
+        return {
+            "status": "success",
+            "message": f"Connected to Reddit as /u/{me['username']} (Total Karma: {me['total_karma']})",
+            "profile": me,
+        }
+    except Exception as e:
+        logger.warning(f"Reddit credentials test failed: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+
 # Mount Web UI HTML Page
 HTML_CONTENT = r"""<!DOCTYPE html>
 <html lang="en">
@@ -1598,6 +1823,68 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             from { opacity: 0; transform: scale(0.96); }
             to { opacity: 1; transform: scale(1); }
         }
+
+        /* AI OP Mode & Components */
+        .studio-mode-switcher {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+            background: rgba(22, 25, 34, 0.7);
+            padding: 0.35rem;
+            border-radius: 999px;
+            border: 1px solid var(--border-subtle);
+            max-width: 540px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .studio-mode-tab {
+            flex: 1;
+            padding: 0.6rem 1.25rem;
+            border-radius: 999px;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: 0.88rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+        .studio-mode-tab.active {
+            background: var(--brand-primary);
+            color: #ffffff;
+            box-shadow: 0 4px 12px rgba(255, 69, 0, 0.35);
+        }
+        .studio-mode-tab:hover:not(.active) {
+            color: #ffffff;
+            background: rgba(255, 255, 255, 0.05);
+        }
+        .ai-op-preview-box {
+            background: #0b0d13;
+            border: 1px solid rgba(255, 69, 0, 0.3);
+            border-radius: var(--radius-lg);
+            padding: 1.25rem;
+            margin-top: 1.25rem;
+        }
+        .ai-op-status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.25rem 0.65rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .status-badge-submitted { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+        .status-badge-waiting { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+        .status-badge-ready { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+        .status-badge-rendered { background: rgba(139, 92, 246, 0.15); color: #a78bfa; border: 1px solid rgba(139, 92, 246, 0.3); }
     </style>
 </head>
 <body>
@@ -1621,9 +1908,14 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <span id="gpuBadgeText">GPU Hardware Acceleration</span>
             </div>
             
+            <button id="redditAuthBtn" class="btn-reddit-account" onclick="openRedditAuthModal()" style="display:inline-flex; align-items:center; gap:0.45rem; background:rgba(255, 69, 0, 0.12); border:1px solid rgba(255, 69, 0, 0.35); color:#ff4500; padding:0.45rem 0.9rem; border-radius:999px; font-size:0.8rem; font-weight:700; cursor:pointer; transition:all 0.2s ease;">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5.01 4.744c.688 0 1.25.561 1.25 1.249a1.25 1.25 0 0 1-2.498.056l-2.597-.547-.8 3.747c1.824.07 3.48.632 4.674 1.488.308-.309.73-.491 1.207-.491.968 0 1.754.786 1.754 1.754 0 .716-.435 1.333-1.01 1.614a3.111 3.111 0 0 1 .042.52c0 2.694-3.13 4.87-7.004 4.87-3.874 0-7.004-2.176-7.004-4.87 0-.183.015-.366.043-.534A1.748 1.748 0 0 1 4.028 12c0-.968.786-1.754 1.754-1.754.463 0 .898.196 1.207.49 1.207-.883 2.878-1.43 4.744-1.487l.885-4.182a.342.342 0 0 1 .14-.197.35.35 0 0 1 .238-.042l2.906.617a1.214 1.214 0 0 1 1.108-.701zM9.25 12C8.56 12 8 12.56 8 13.25c0 .688.56 1.25 1.25 1.25.688 0 1.25-.562 1.25-1.25 0-.69-.562-1.25-1.25-1.25zm5.5 0c-.688 0-1.25.56-1.25 1.25 0 .688.562 1.25 1.25 1.25.69 0 1.25-.562 1.25-1.25 0-.69-.56-1.25-1.25-1.25zm-5.465 3.99a.577.577 0 0 0-.41.983c.77.77 1.83 1.15 2.875 1.15 1.044 0 2.104-.38 2.874-1.15a.577.577 0 0 0-.82-.816c-.552.55-1.318.82-2.054.82-.736 0-1.502-.27-2.054-.82a.574.574 0 0 0-.411-.167z"/></svg>
+                <span id="redditAuthBtnText">Reddit Bot: Setup</span>
+            </button>
+
             <button id="ytAuthBtn" class="btn-yt-login" onclick="openYouTubeAuthModal()">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
-                <span>Enter YouTube API for Auto-Upload</span>
+                <span>YouTube API</span>
             </button>
 
             <div id="ytChannelBadge" class="yt-channel-badge-container">
@@ -1637,8 +1929,18 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     </header>
 
     <main>
-        <!-- Control Panel -->
-        <div class="panel">
+        <!-- Studio Mode Switcher -->
+        <div class="studio-mode-switcher" style="grid-column: 1 / -1;">
+            <button type="button" id="modeBtnScraper" class="studio-mode-tab active" onclick="switchStudioMode('scraper')">
+                🎬 Scraper &amp; Render Studio
+            </button>
+            <button type="button" id="modeBtnAiOp" class="studio-mode-tab" onclick="switchStudioMode('ai-op')">
+                🤖 AI OP (Auto-Poster &amp; Meatbag Watcher)
+            </button>
+        </div>
+
+        <!-- Scraper Control Panel -->
+        <div class="panel" id="panelScraperConfig">
             <div class="panel-header">
                 <div class="panel-title-wrapper">
                     <div class="panel-icon-box">
@@ -1818,7 +2120,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         </div>
 
         <!-- Preview & Output Panel -->
-        <div class="panel">
+        <div class="panel" id="panelScraperPreview">
             <div class="panel-header">
                 <div class="panel-title-wrapper">
                     <div class="panel-icon-box preview-icon">
@@ -1853,6 +2155,125 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             <div style="margin-top: 1.4rem;">
                 <label style="color: var(--text-secondary);">Recent Generated Outputs</label>
                 <div class="history-list" id="historyList"></div>
+            </div>
+        </div>
+
+        <!-- ==================== AI OP STUDIO PANELS ==================== -->
+        <!-- AI OP Creator Panel -->
+        <div class="panel" id="panelAiOpCreator" style="display:none;">
+            <div class="panel-header">
+                <div class="panel-title-wrapper">
+                    <div class="panel-icon-box" style="background:rgba(255, 69, 0, 0.12); color:#ff4500; border-color:rgba(255, 69, 0, 0.3);">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+                    </div>
+                    <div>
+                        <div class="panel-title">AI OP Post Ideation &amp; Poster</div>
+                        <div style="font-size:0.75rem; color:var(--text-tertiary);">Craft viral posts engineered to bait human meatbags for funny comments</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-grid" style="margin-top:1.25rem;">
+                <div class="form-group">
+                    <label for="aiOpSubreddit">Target Subreddit</label>
+                    <select id="aiOpSubreddit" onchange="onAiOpSubredditChange()">
+                        <option value="AskReddit" selected>r/AskReddit</option>
+                        <option value="Showerthoughts">r/Showerthoughts</option>
+                        <option value="unpopularopinion">r/unpopularopinion</option>
+                        <option value="AmItheAsshole">r/AmItheAsshole</option>
+                        <option value="tifu">r/tifu</option>
+                        <option value="NoStupidQuestions">r/NoStupidQuestions</option>
+                        <option value="mildlyinfuriating">r/mildlyinfuriating</option>
+                        <option value="custom">-- Custom Subreddit --</option>
+                    </select>
+                    <input type="text" id="aiOpCustomSub" placeholder="e.g. funny, memes, CasualConversation" style="display:none; margin-top:0.45rem;">
+                </div>
+
+                <div class="form-group">
+                    <label for="aiOpStyle">Persona / Tone Style</label>
+                    <select id="aiOpStyle">
+                        <option value="comedic" selected>Comedic &amp; Witty</option>
+                        <option value="absurd">Absurd &amp; Surreal</option>
+                        <option value="provocative">Spicy Hot Take</option>
+                        <option value="story">Blunder / Dilemma Story</option>
+                        <option value="thought-provoking">Thought-Provoking Epiphany</option>
+                    </select>
+                </div>
+
+                <div class="form-group full-width">
+                    <label for="aiOpTheme">Topic / Theme <span style="font-size:0.75rem; color:var(--text-tertiary); font-weight:400;">(Optional - leave empty for AI's choice)</span></label>
+                    <input type="text" id="aiOpTheme" placeholder="e.g. 'Job interview red flags', 'Roommate horror stories', 'Superpowers with dumb caveats'">
+                </div>
+
+                <div class="form-group">
+                    <label for="aiOpMinComments">Comments Target to Trigger Video</label>
+                    <input type="number" id="aiOpMinComments" value="2" min="1" max="10">
+                </div>
+
+                <div class="form-group" style="display:flex; align-items:center; justify-content:space-between; background:var(--bg-surface-elevated); padding:0.75rem 1rem; border-radius:var(--radius-md); border:1px solid var(--border-subtle); margin-top:0.35rem;">
+                    <label style="margin:0; font-weight:700; cursor:pointer;" for="aiOpDryRun">
+                        Simulation / Dry-Run Mode
+                        <div style="font-size:0.72rem; color:var(--text-tertiary); font-weight:400;">Simulate posting &amp; comments without live Reddit API calls</div>
+                    </label>
+                    <input type="checkbox" id="aiOpDryRun" style="width:1.2rem; height:1.2rem; cursor:pointer;">
+                </div>
+            </div>
+
+            <div style="margin-top:1.25rem;">
+                <button type="button" class="main-action-btn btn-upload" id="btnAiOpGenerate" onclick="generateAiOpPost()" style="width:100%;">
+                    <span>✨ Generate Viral Post Idea</span>
+                </button>
+            </div>
+
+            <!-- AI OP Live Editable Preview -->
+            <div id="aiOpPreviewBox" class="ai-op-preview-box" style="display:none;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.75rem; border-bottom:1px solid var(--border-subtle); padding-bottom:0.5rem;">
+                    <div style="display:flex; align-items:center; gap:0.45rem;">
+                        <span class="badge-pill" id="prevSubBadge">r/AskReddit</span>
+                        <span style="font-size:0.75rem; color:var(--text-tertiary);">Posted by u/<span id="prevAuthor">AI_OP_Bot</span></span>
+                    </div>
+                    <span id="prevModelPill" class="badge-pill" style="background:rgba(59, 130, 246, 0.15); color:#60a5fa; border:none; font-size:0.7rem;">Ollama Gemma</span>
+                </div>
+
+                <div style="margin-bottom:0.75rem;">
+                    <label style="font-size:0.75rem; color:var(--text-secondary);">Post Title (Editable)</label>
+                    <input type="text" id="prevTitleInput" style="font-weight:700; font-size:0.95rem; color:#ffffff; background:var(--bg-input);">
+                </div>
+
+                <div id="prevBodyGroup" style="margin-bottom:0.75rem;">
+                    <label style="font-size:0.75rem; color:var(--text-secondary);">Post Body / Selftext (Editable)</label>
+                    <textarea id="prevBodyInput" rows="3" style="width:100%; padding:0.65rem; background:var(--bg-input); border:1px solid var(--border-strong); border-radius:var(--radius-md); color:#ffffff; font-size:0.82rem; resize:vertical;"></textarea>
+                </div>
+
+                <div id="prevRationaleBox" style="font-size:0.78rem; color:#93c5fd; background:rgba(59, 130, 246, 0.08); border:1px solid rgba(59, 130, 246, 0.2); padding:0.5rem 0.75rem; border-radius:var(--radius-md); margin-bottom:0.85rem;">
+                    💡 <b>Why meatbags will comment:</b> <span id="prevRationaleText">...</span>
+                </div>
+
+                <button type="button" class="main-action-btn" id="btnAiOpSubmit" onclick="submitAiOpPost()" style="width:100%; background:linear-gradient(135deg, #10b981 0%, #059669 100%); color:#ffffff;">
+                    <span>🚀 Submit Post to Reddit &amp; Start Watching</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- AI OP Tracker Panel -->
+        <div class="panel" id="panelAiOpTracker" style="display:none;">
+            <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
+                <div class="panel-title-wrapper">
+                    <div class="panel-icon-box" style="background:rgba(59, 130, 246, 0.12); color:#3b82f6; border-color:rgba(59, 130, 246, 0.3);">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    </div>
+                    <div>
+                        <div class="panel-title">Tracked AI Posts &amp; Meatbag Monitor</div>
+                        <div style="font-size:0.75rem; color:var(--text-tertiary);">Track human comments and auto-trigger video rendering</div>
+                    </div>
+                </div>
+                <button type="button" class="mini-btn" onclick="loadAiOpPosts()" style="padding:0.4rem 0.8rem;">🔄 Refresh</button>
+            </div>
+
+            <div id="aiOpPostsContainer" style="margin-top:1rem; max-height:580px; overflow-y:auto;">
+                <div style="text-align:center; padding:2rem 1rem; color:var(--text-tertiary); font-size:0.85rem;">
+                    No active AI OP posts yet. Generate and submit a post to begin tracking!
+                </div>
             </div>
         </div>
     </main>
@@ -2851,8 +3272,475 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             }
         }
 
+        // ==================== AI OP STUDIO JAVASCRIPT ====================
+        let currentAiOpPost = null;
+
+        function switchStudioMode(mode) {
+            const btnScraper = document.getElementById('modeBtnScraper');
+            const btnAiOp = document.getElementById('modeBtnAiOp');
+            const panelScraperConfig = document.getElementById('panelScraperConfig');
+            const panelScraperPreview = document.getElementById('panelScraperPreview');
+            const panelAiOpCreator = document.getElementById('panelAiOpCreator');
+            const panelAiOpTracker = document.getElementById('panelAiOpTracker');
+
+            if (mode === 'ai-op') {
+                if (btnScraper) btnScraper.classList.remove('active');
+                if (btnAiOp) btnAiOp.classList.add('active');
+                if (panelScraperConfig) panelScraperConfig.style.display = 'none';
+                if (panelScraperPreview) panelScraperPreview.style.display = 'none';
+                if (panelAiOpCreator) panelAiOpCreator.style.display = 'block';
+                if (panelAiOpTracker) panelAiOpTracker.style.display = 'block';
+                loadAiOpPosts();
+            } else {
+                if (btnScraper) btnScraper.classList.add('active');
+                if (btnAiOp) btnAiOp.classList.remove('active');
+                if (panelScraperConfig) panelScraperConfig.style.display = 'block';
+                if (panelScraperPreview) panelScraperPreview.style.display = 'block';
+                if (panelAiOpCreator) panelAiOpCreator.style.display = 'none';
+                if (panelAiOpTracker) panelAiOpTracker.style.display = 'none';
+            }
+        }
+
+        function onAiOpSubredditChange() {
+            const sel = document.getElementById('aiOpSubreddit');
+            const custom = document.getElementById('aiOpCustomSub');
+            if (sel && custom) {
+                custom.style.display = sel.value === 'custom' ? 'block' : 'none';
+            }
+        }
+
+        async function generateAiOpPost() {
+            const btn = document.getElementById('btnAiOpGenerate');
+            const sel = document.getElementById('aiOpSubreddit');
+            const custom = document.getElementById('aiOpCustomSub');
+            const style = document.getElementById('aiOpStyle');
+            const theme = document.getElementById('aiOpTheme');
+            const previewBox = document.getElementById('aiOpPreviewBox');
+
+            let sub = sel ? sel.value : 'AskReddit';
+            if (sub === 'custom') {
+                sub = custom ? custom.value.trim() : 'AskReddit';
+            }
+            if (!sub) sub = 'AskReddit';
+
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = '✨ Crafting viral post idea...';
+            }
+
+            try {
+                const resp = await fetch('/api/ai-op/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        subreddit: sub,
+                        theme: theme ? theme.value.trim() : '',
+                        style: style ? style.value : 'comedic'
+                    })
+                });
+                const data = await resp.json();
+                if (resp.ok && data.post) {
+                    currentAiOpPost = data.post;
+                    if (previewBox) previewBox.style.display = 'block';
+                    const prevSub = document.getElementById('prevSubBadge');
+                    const prevTitle = document.getElementById('prevTitleInput');
+                    const prevBody = document.getElementById('prevBodyInput');
+                    const prevBodyGroup = document.getElementById('prevBodyGroup');
+                    const prevRationale = document.getElementById('prevRationaleText');
+                    const prevModel = document.getElementById('prevModelPill');
+
+                    if (prevSub) prevSub.innerText = 'r/' + data.post.subreddit;
+                    if (prevTitle) prevTitle.value = data.post.title;
+                    if (prevBody) prevBody.value = data.post.body || '';
+                    if (prevBodyGroup) prevBodyGroup.style.display = (data.post.body || sub.toLowerCase() === 'amitheasshole' || sub.toLowerCase() === 'tifu' || sub.toLowerCase() === 'unpopularopinion') ? 'block' : 'none';
+                    if (prevRationale) prevRationale.innerText = data.post.rationale || 'Engineered for high comment engagement.';
+                    if (prevModel) prevModel.innerText = data.post.is_fallback ? 'Template Fallback' : (data.post.model_used || 'Ollama Gemma');
+                } else {
+                    alert('Failed to generate post: ' + (data.detail || 'Unknown error'));
+                }
+            } catch (e) {
+                alert('Error generating post: ' + e.message);
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = '✨ Generate Viral Post Idea';
+                }
+            }
+        }
+
+        async function submitAiOpPost() {
+            const btn = document.getElementById('btnAiOpSubmit');
+            const titleInput = document.getElementById('prevTitleInput');
+            const bodyInput = document.getElementById('prevBodyInput');
+            const minCommentsInput = document.getElementById('aiOpMinComments');
+            const dryRunInput = document.getElementById('aiOpDryRun');
+
+            if (!titleInput || !titleInput.value.trim()) {
+                alert('Please enter or generate a post title first.');
+                return;
+            }
+
+            const title = titleInput.value.trim();
+            const body = bodyInput ? bodyInput.value.trim() : '';
+            const sub = currentAiOpPost ? currentAiOpPost.subreddit : 'AskReddit';
+            const minComments = minCommentsInput ? parseInt(minCommentsInput.value, 10) : 2;
+            const isDryRun = dryRunInput ? dryRunInput.checked : false;
+
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = '🚀 Posting to Reddit...';
+            }
+
+            try {
+                const resp = await fetch('/api/ai-op/post', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        subreddit: sub,
+                        title: title,
+                        body: body,
+                        min_comments: minComments,
+                        dry_run: isDryRun
+                    })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    alert('✓ AI OP post submitted successfully! Now monitoring for comments.');
+                    loadAiOpPosts();
+                } else {
+                    alert('Submission failed: ' + (data.detail || 'Check your Reddit API credentials'));
+                }
+            } catch (e) {
+                alert('Error submitting post: ' + e.message);
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = '🚀 Submit Post to Reddit & Start Watching';
+                }
+            }
+        }
+
+        async function loadAiOpPosts() {
+            const container = document.getElementById('aiOpPostsContainer');
+            if (!container) return;
+
+            try {
+                const resp = await fetch('/api/ai-op/posts');
+                const data = await resp.json();
+                if (!resp.ok || !data.posts || data.posts.length === 0) {
+                    container.innerHTML = '<div style="text-align:center; padding:2rem 1rem; color:var(--text-tertiary); font-size:0.85rem;">No active AI OP posts yet. Generate and submit a post to begin tracking!</div>';
+                    return;
+                }
+
+                let html = '<div style="display:flex; flex-direction:column; gap:0.85rem;">';
+                for (const p of data.posts) {
+                    let badgeClass = 'status-badge-waiting';
+                    let badgeText = '⏳ WAITING FOR MEATBAGS';
+                    if (p.status === 'submitted') { badgeClass = 'status-badge-submitted'; badgeText = 'SUBMITTED'; }
+                    else if (p.status === 'ready_to_render') { badgeClass = 'status-badge-ready'; badgeText = '⚡ READY TO RENDER'; }
+                    else if (p.status === 'rendered') { badgeClass = 'status-badge-rendered'; badgeText = '🎬 RENDERED'; }
+
+                    html += `
+                    <div style="background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:1rem; display:flex; flex-direction:column; gap:0.65rem;">
+                        <div style="display:flex; align-items:center; justify-content:space-between;">
+                            <div style="display:flex; align-items:center; gap:0.5rem;">
+                                <span class="badge-pill">r/${p.subreddit}</span>
+                                <span style="font-size:0.75rem; color:var(--text-tertiary); font-family:'JetBrains Mono', monospace;">[${p.post_id}]</span>
+                            </div>
+                            <span class="ai-op-status-badge ${badgeClass}">${badgeText}</span>
+                        </div>
+                        <div style="font-weight:700; font-size:0.92rem; color:#ffffff;">${p.title}</div>
+                        ${p.body ? `<div style="font-size:0.8rem; color:var(--text-secondary); line-height:1.4;">${p.body.substring(0, 140)}${p.body.length > 140 ? '...' : ''}</div>` : ''}
+                        
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-top:0.35rem; border-top:1px solid var(--border-subtle); padding-top:0.65rem;">
+                            <div style="font-size:0.78rem; color:var(--text-secondary);">
+                                💬 Comments: <b style="color:#ffffff;">${p.current_comments_count}</b> / ${p.min_comments_target}
+                                ${p.last_checked_at ? `<span style="color:var(--text-tertiary); margin-left:0.5rem; font-size:0.72rem;">(Checked: ${new Date(p.last_checked_at).toLocaleTimeString()})</span>` : ''}
+                            </div>
+                            <div style="display:flex; gap:0.45rem;">
+                                <button type="button" class="mini-btn" onclick="checkAiOpPost('${p.post_id}')">🔄 Check</button>
+                                ${p.status !== 'rendered' ? `<button type="button" class="mini-btn" style="background:var(--brand-primary); color:#ffffff; font-weight:700;" onclick="renderAiOpPost('${p.post_id}')">🎬 Render</button>` : ''}
+                                ${p.rendered_video_path ? `<button type="button" class="mini-btn" style="background:#10b981; color:#ffffff; font-weight:700;" onclick="playAiOpVideo('${p.rendered_video_path}')">▶ Play</button>` : ''}
+                                ${p.url ? `<a href="${p.url}" target="_blank" class="mini-btn" style="text-decoration:none;">🔗 Reddit</a>` : ''}
+                                <button type="button" class="mini-btn" style="color:#ef4444;" onclick="deleteAiOpPost('${p.post_id}')">🗑️</button>
+                            </div>
+                        </div>
+                    </div>
+                    `;
+                }
+                html += '</div>';
+                container.innerHTML = html;
+            } catch (e) {
+                console.error('Failed to load AI OP posts:', e);
+            }
+        }
+
+        async function checkAiOpPost(postId) {
+            try {
+                const resp = await fetch('/api/ai-op/check/' + postId, { method: 'POST' });
+                const data = await resp.json();
+                if (resp.ok) {
+                    loadAiOpPosts();
+                } else {
+                    alert('Check failed: ' + (data.error || data.detail || 'Network error'));
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function renderAiOpPost(postId) {
+            try {
+                const resp = await fetch('/api/ai-op/render/' + postId, { method: 'POST' });
+                const data = await resp.json();
+                if (resp.ok) {
+                    alert('Rendering started! Switching to Studio tab to monitor progress.');
+                    switchStudioMode('scraper');
+                    startPollingStatus();
+                } else {
+                    alert('Render failed: ' + (data.detail || 'Unknown error'));
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        function playAiOpVideo(videoPath) {
+            switchStudioMode('scraper');
+            const player = document.getElementById('videoPlayer');
+            const placeholder = document.getElementById('placeholderText');
+            if (player) {
+                player.src = '/' + videoPath.replace(/\\/g, '/');
+                player.style.display = 'block';
+                if (placeholder) placeholder.style.display = 'none';
+                player.play();
+            }
+        }
+
+        async function deleteAiOpPost(postId) {
+            if (!confirm("Are you sure you want to delete this tracked AI OP post?")) return;
+            try {
+                const resp = await fetch('/api/ai-op/posts/' + postId, { method: 'DELETE' });
+                if (resp.ok) {
+                    loadAiOpPosts();
+                }
+            } catch (e) {
+                alert('Error deleting post: ' + e.message);
+            }
+        }
+
+        // ==================== REDDIT SOCK PUPPET & BOT AUTH MODAL ====================
+        let activeRedditModalTab = 'browser';
+
+        function switchRedditModalTab(tab) {
+            activeRedditModalTab = tab;
+            const tabs = ['browser', 'account', 'api'];
+            tabs.forEach(t => {
+                const btn = document.getElementById('tabBtnReddit' + t.charAt(0).toUpperCase() + t.slice(1));
+                const pane = document.getElementById('tabContentReddit' + t.charAt(0).toUpperCase() + t.slice(1));
+                if (btn) btn.classList.toggle('active', t === tab);
+                if (pane) pane.style.display = (t === tab) ? 'block' : 'none';
+            });
+        }
+
+        async function openRedditAuthModal() {
+            const modal = document.getElementById('redditAuthModal');
+            const notice = document.getElementById('redditStatusNotice');
+            if (!modal) return;
+
+            try {
+                const resp = await fetch('/api/ai-op/credentials');
+                const data = await resp.json();
+                if (notice) {
+                    notice.style.display = 'block';
+                    if (data.has_session) {
+                        notice.style.background = 'rgba(16, 185, 129, 0.1)';
+                        notice.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                        notice.style.color = '#6ee7b7';
+                        notice.innerHTML = '✓ <b>Browser Sock Puppet Session Active</b>: Authenticated and ready for undetectable remote posting!';
+                    } else if (data.has_credentials) {
+                        notice.style.background = 'rgba(59, 130, 246, 0.1)';
+                        notice.style.borderColor = 'rgba(59, 130, 246, 0.3)';
+                        notice.style.color = '#93c5fd';
+                        notice.innerHTML = '✓ Reddit Bot Configured: <b>/u/' + data.username + '</b> (OAuth Script Mode)';
+                        const uInput = document.getElementById('redditUsername');
+                        if (uInput && !uInput.value) uInput.value = data.username;
+                    } else {
+                        notice.style.background = 'rgba(245, 158, 11, 0.08)';
+                        notice.style.borderColor = 'rgba(245, 158, 11, 0.25)';
+                        notice.style.color = '#fcd34d';
+                        notice.innerHTML = '👉 Click <b>Launch Chromium to Log In</b> below to connect your sock puppet account, or configure credentials manually.';
+                    }
+                }
+            } catch (e) {
+                console.error(e);
+            }
+
+            modal.style.display = 'flex';
+        }
+
+        function closeRedditAuthModal() {
+            const modal = document.getElementById('redditAuthModal');
+            if (modal) modal.style.display = 'none';
+        }
+
+        async function startRedditBrowserLogin() {
+            const btn = document.getElementById('btnRedditBrowserLogin');
+            const statusDiv = document.getElementById('redditBrowserLoginStatus');
+
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = '🌐 Browser open - Log into Reddit...';
+            }
+            if (statusDiv) {
+                statusDiv.style.display = 'block';
+                statusDiv.style.color = '#60a5fa';
+                statusDiv.innerHTML = '⏳ Chromium window launched. Please log into your Reddit sock puppet account in the opened window...';
+            }
+
+            try {
+                const resp = await fetch('/api/ai-op/browser-login', { method: 'POST' });
+                const data = await resp.json();
+                if (resp.ok && data.status === 'success') {
+                    if (statusDiv) {
+                        statusDiv.style.color = '#4ade80';
+                        statusDiv.innerHTML = '✓ ' + data.message;
+                    }
+                    setTimeout(function() {
+                        closeRedditAuthModal();
+                        checkRedditAuthStatus();
+                    }, 1200);
+                } else {
+                    if (statusDiv) {
+                        statusDiv.style.color = '#ef4444';
+                        statusDiv.innerHTML = '❌ ' + (data.detail || 'Login timed out or was closed.');
+                    }
+                }
+            } catch (e) {
+                if (statusDiv) {
+                    statusDiv.style.color = '#ef4444';
+                    statusDiv.innerHTML = '❌ Error: ' + e.message;
+                }
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = '🌐 Launch Chromium to Log In to Reddit';
+                }
+            }
+        }
+
+        async function saveRedditCredentials() {
+            const cid = document.getElementById('redditClientId') ? document.getElementById('redditClientId').value.trim() : '';
+            const csec = document.getElementById('redditClientSecret') ? document.getElementById('redditClientSecret').value.trim() : '';
+            const uname = document.getElementById('redditUsername') ? document.getElementById('redditUsername').value.trim() : '';
+            const pwd = document.getElementById('redditPassword') ? document.getElementById('redditPassword').value.trim() : '';
+            const ua = document.getElementById('redditUserAgent') ? document.getElementById('redditUserAgent').value.trim() : '';
+
+            if (!uname || !pwd) {
+                alert('Please enter at least Username and Password.');
+                return;
+            }
+
+            try {
+                const resp = await fetch('/api/ai-op/credentials', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        client_id: cid,
+                        client_secret: csec,
+                        username: uname,
+                        password: pwd,
+                        user_agent: ua
+                    })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    alert('✓ Reddit credentials saved successfully!');
+                    closeRedditAuthModal();
+                    checkRedditAuthStatus();
+                } else {
+                    alert('Failed: ' + (data.detail || 'Error saving credentials'));
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function testRedditCredentials() {
+            const cid = document.getElementById('redditClientId') ? document.getElementById('redditClientId').value.trim() : '';
+            const csec = document.getElementById('redditClientSecret') ? document.getElementById('redditClientSecret').value.trim() : '';
+            const uname = document.getElementById('redditUsername') ? document.getElementById('redditUsername').value.trim() : '';
+            const pwd = document.getElementById('redditPassword') ? document.getElementById('redditPassword').value.trim() : '';
+
+            let payload = null;
+            if (cid && csec && uname && pwd) {
+                payload = { client_id: cid, client_secret: csec, username: uname, password: pwd };
+            }
+
+            const notice = document.getElementById('redditStatusNotice');
+            if (notice) {
+                notice.style.display = 'block';
+                notice.style.background = 'rgba(59, 130, 246, 0.1)';
+                notice.style.borderColor = 'rgba(59, 130, 246, 0.3)';
+                notice.style.color = '#93c5fd';
+                notice.innerHTML = '⏳ Testing connection...';
+            }
+
+            try {
+                const resp = await fetch('/api/ai-op/test-credentials', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: payload ? JSON.stringify(payload) : null
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    if (notice) {
+                        notice.style.background = 'rgba(16, 185, 129, 0.1)';
+                        notice.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                        notice.style.color = '#6ee7b7';
+                        notice.innerHTML = '✓ ' + data.message;
+                    }
+                } else {
+                    if (notice) {
+                        notice.style.background = 'rgba(239, 68, 68, 0.1)';
+                        notice.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+                        notice.style.color = '#fca5a5';
+                        notice.innerHTML = '❌ Connection failed: ' + (data.detail || 'Check credentials');
+                    }
+                }
+            } catch (e) {
+                if (notice) {
+                    notice.style.background = 'rgba(239, 68, 68, 0.1)';
+                    notice.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+                    notice.style.color = '#fca5a5';
+                    notice.innerHTML = '❌ Error: ' + e.message;
+                }
+            }
+        }
+
+        async function checkRedditAuthStatus() {
+            try {
+                const resp = await fetch('/api/ai-op/credentials');
+                const data = await resp.json();
+                const btnText = document.getElementById('redditAuthBtnText');
+                if (btnText) {
+                    if (data.has_session) {
+                        btnText.innerText = 'Reddit: Browser Active';
+                    } else if (data.has_credentials && data.username) {
+                        btnText.innerText = 'Reddit: /u/' + data.username;
+                    } else {
+                        btnText.innerText = 'Reddit Account: Setup';
+                    }
+                }
+            } catch (e) {
+                console.error('Reddit auth check failed:', e);
+            }
+        }
+
         window.addEventListener('DOMContentLoaded', function() {
             renderCustomSubredditsInBatchList();
+            checkRedditAuthStatus();
+            loadAiOpPosts();
         });
     </script>
 
@@ -2925,6 +3813,83 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <button type="button" id="modalSaveAuthBtn" class="btn-yt-login" onclick="saveYouTubeCredentialsAndAuth()" style="padding:0.6rem 1.25rem; border-radius:var(--radius-md);">
                     <span>Connect &amp; Authorize YouTube</span>
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reddit Sock Puppet / Bot Account Configuration Modal -->
+    <div id="redditAuthModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this) closeRedditAuthModal()">
+        <div class="modal-card">
+            <div class="modal-header" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1.15rem; border-bottom:1px solid var(--border-subtle); padding-bottom:0.85rem;">
+                <div style="display:flex; align-items:center; gap:0.65rem;">
+                    <div class="panel-icon-box" style="background:rgba(255, 69, 0, 0.12); border-color:rgba(255, 69, 0, 0.3); color:#ff4500;">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5.01 4.744c.688 0 1.25.561 1.25 1.249a1.25 1.25 0 0 1-2.498.056l-2.597-.547-.8 3.747c1.824.07 3.48.632 4.674 1.488.308-.309.73-.491 1.207-.491.968 0 1.754.786 1.754 1.754 0 .716-.435 1.333-1.01 1.614a3.111 3.111 0 0 1 .042.52c0 2.694-3.13 4.87-7.004 4.87-3.874 0-7.004-2.176-7.004-4.87 0-.183.015-.366.043-.534A1.748 1.748 0 0 1 4.028 12c0-.968.786-1.754 1.754-1.754.463 0 .898.196 1.207.49 1.207-.883 2.878-1.43 4.744-1.487l.885-4.182a.342.342 0 0 1 .14-.197.35.35 0 0 1 .238-.042l2.906.617a1.214 1.214 0 0 1 1.108-.701zM9.25 12C8.56 12 8 12.56 8 13.25c0 .688.56 1.25 1.25 1.25.688 0 1.25-.562 1.25-1.25 0-.69-.562-1.25-1.25-1.25zm5.5 0c-.688 0-1.25.56-1.25 1.25 0 .688.562 1.25 1.25 1.25.69 0 1.25-.562 1.25-1.25 0-.69-.56-1.25-1.25-1.25zm-5.465 3.99a.577.577 0 0 0-.41.983c.77.77 1.83 1.15 2.875 1.15 1.044 0 2.104-.38 2.874-1.15a.577.577 0 0 0-.82-.816c-.552.55-1.318.82-2.054.82-.736 0-1.502-.27-2.054-.82a.574.574 0 0 0-.411-.167z"/></svg>
+                    </div>
+                    <div>
+                        <div style="font-weight:800; font-size:1.08rem; color:#ffffff;">Reddit Sock Puppet Account Settings</div>
+                        <div style="font-size:0.75rem; color:var(--text-tertiary);">Connect your dedicated sock puppet account for AI posting</div>
+                    </div>
+                </div>
+                <button type="button" class="mini-btn" onclick="closeRedditAuthModal()" style="font-size:1.2rem; line-height:1; padding:0.2rem 0.55rem;">&times;</button>
+            </div>
+
+            <div id="redditStatusNotice" style="margin-bottom: 1rem; padding: 0.75rem 1rem; border-radius: var(--radius-md); font-size: 0.82rem; display: none;"></div>
+
+            <div class="tab-nav" style="display:flex; gap:0.45rem; margin-bottom:1.15rem; border-bottom:1px solid var(--border-subtle); padding-bottom:0.65rem;">
+                <button type="button" id="tabBtnRedditBrowser" class="mini-btn tab-btn active" onclick="switchRedditModalTab('browser')">🌐 Browser Login (Recommended)</button>
+                <button type="button" id="tabBtnRedditAccount" class="mini-btn tab-btn" onclick="switchRedditModalTab('account')">🔑 User / Password</button>
+                <button type="button" id="tabBtnRedditApi" class="mini-btn tab-btn" onclick="switchRedditModalTab('api')">⚙️ OAuth App API</button>
+            </div>
+
+            <!-- Tab 1: Browser Sock Puppet Login -->
+            <div id="tabContentRedditBrowser" class="modal-tab-pane">
+                <div style="border: 2px dashed rgba(255, 69, 0, 0.35); border-radius: var(--radius-md); padding: 1.5rem 1rem; text-align: center; background: var(--bg-input);">
+                    <div style="font-size:1.75rem; margin-bottom:0.5rem;">🕵️‍♂️</div>
+                    <div style="font-weight:700; font-size:0.95rem; color:#ffffff; margin-bottom:0.35rem;">Remote Sock Puppet Browser Session</div>
+                    <p style="font-size:0.82rem; color:var(--text-secondary); max-width:380px; margin:0 auto 1.15rem; line-height:1.5;">
+                        Launches a real Chromium browser window. Simply log in to your dedicated Reddit account once. Your session cookies will be saved locally so the AI can post remotely as a human user without API bot restrictions.
+                    </p>
+                    <button type="button" id="btnRedditBrowserLogin" class="main-action-btn btn-upload" onclick="startRedditBrowserLogin()" style="margin:0 auto; padding:0.75rem 1.4rem;">
+                        <span>🌐 Launch Chromium to Log In to Reddit</span>
+                    </button>
+                    <div id="redditBrowserLoginStatus" style="font-size:0.82rem; margin-top:0.85rem; display:none;"></div>
+                </div>
+            </div>
+
+            <!-- Tab 2: Direct Username & Password -->
+            <div id="tabContentRedditAccount" class="modal-tab-pane" style="display:none;">
+                <div style="margin-bottom:0.85rem;">
+                    <label for="redditUsername">Sock Puppet Username</label>
+                    <input type="text" id="redditUsername" placeholder="e.g. MyDedicatedSockPuppet">
+                </div>
+                <div style="margin-bottom:0.85rem;">
+                    <label for="redditPassword">Account Password</label>
+                    <input type="password" id="redditPassword" placeholder="Account password">
+                </div>
+            </div>
+
+            <!-- Tab 3: OAuth API (Optional) -->
+            <div id="tabContentRedditApi" class="modal-tab-pane" style="display:none;">
+                <div style="margin-bottom:0.85rem;">
+                    <label for="redditClientId">Reddit Script App Client ID</label>
+                    <input type="text" id="redditClientId" placeholder="e.g. 14-char script app ID from reddit.com/prefs/apps">
+                </div>
+                <div style="margin-bottom:0.85rem;">
+                    <label for="redditClientSecret">Reddit Script App Client Secret</label>
+                    <input type="password" id="redditClientSecret" placeholder="e.g. secret key string">
+                </div>
+                <div style="margin-bottom:0.85rem;">
+                    <label for="redditUserAgent">User Agent (Optional)</label>
+                    <input type="text" id="redditUserAgent" placeholder="python:ai-op-shorts-generator:v1.0">
+                </div>
+            </div>
+
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:1.25rem; border-top:1px solid var(--border-subtle); padding-top:1rem;">
+                <button type="button" class="mini-btn" onclick="testRedditCredentials()" style="padding:0.6rem 1rem;">🔌 Test Connection</button>
+                <div style="display:flex; gap:0.5rem;">
+                    <button type="button" class="mini-btn" onclick="closeRedditAuthModal()" style="padding:0.6rem 1.1rem;">Cancel</button>
+                    <button type="button" class="btn-primary" onclick="saveRedditCredentials()" style="padding:0.6rem 1.25rem; font-size:0.85rem;">Save Credentials</button>
+                </div>
             </div>
         </div>
     </div>

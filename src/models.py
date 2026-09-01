@@ -275,3 +275,51 @@ def calculate_clip_timeline(
         })
         current_time = end_time
     return timeline
+
+
+@dataclass
+class AIPostRecord:
+    """Dataclass representing an AI OP submission tracked across its lifecycle."""
+    post_id: str
+    subreddit: str
+    title: str
+    body: str = ""
+    url: str = ""
+    author: str = ""
+    created_utc: float = 0.0
+    status: str = "submitted"  # submitted, waiting_for_comments, ready_to_render, rendered, failed
+    min_comments_target: int = 2
+    current_comments_count: int = 0
+    top_comments_preview: List[str] = field(default_factory=list)
+    last_checked_at: Optional[str] = None
+    rendered_video_path: Optional[str] = None
+    rendered_folder: Optional[str] = None
+    error: Optional[str] = None
+    is_simulated: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "AIPostRecord":
+        if not d.get("post_id"):
+            raise ValueError("AIPostRecord must have a valid post_id")
+        return cls(
+            post_id=str(d["post_id"]),
+            subreddit=str(d.get("subreddit", "AskReddit")),
+            title=str(d.get("title", "")),
+            body=str(d.get("body", "")),
+            url=str(d.get("url", "")),
+            author=str(d.get("author", "")),
+            created_utc=float(d.get("created_utc", 0.0)),
+            status=str(d.get("status", "submitted")),
+            min_comments_target=int(d.get("min_comments_target", 2)),
+            current_comments_count=int(d.get("current_comments_count", 0)),
+            top_comments_preview=list(d.get("top_comments_preview", [])),
+            last_checked_at=d.get("last_checked_at"),
+            rendered_video_path=d.get("rendered_video_path"),
+            rendered_folder=d.get("rendered_folder"),
+            error=d.get("error"),
+            is_simulated=bool(d.get("is_simulated", False)),
+        )
+
